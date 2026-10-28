@@ -91,6 +91,15 @@ def parse_sse(text: str) -> list[dict]:
     return events
 
 
+def test_cors_preflight(client):
+    r = client.options(
+        "/v1/responses",
+        headers={"Origin": "https://example.com", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization,content-type"},
+    )
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == "*"
+
+
 def test_health(client):
     assert client.get("/health").json() == {"status": "ok"}
 

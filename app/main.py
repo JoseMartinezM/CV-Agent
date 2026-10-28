@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterator
 
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from google.genai import errors as genai_errors
 
@@ -25,6 +26,9 @@ from app.responses import (
 from app.schemas import CreateResponseRequest, ErrorDetail, ErrorResponse, ResponseResource
 
 app = FastAPI(title="Jose Manuel CV Agent")
+# browser clients (like the official compliance page) need this. it's safe to open
+# because auth is a bearer key, not cookies
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 def log(severity: str = "INFO", **fields) -> None:
