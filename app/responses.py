@@ -44,7 +44,7 @@ def new_id(prefix: str) -> str:
 
 
 # ponytail: in-memory store for previous_response_id. lost on restart and not shared
-# between instances, so cloud run runs with max-instances=1. a db if it ever scales
+# between instances. fine with a single container, needs a db (redis, postgres) to scale
 _history: dict[str, list[Turn]] = {}
 MAX_STORED = 500
 
