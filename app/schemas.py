@@ -29,6 +29,16 @@ class CreateResponseRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class CompactRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    model: str  # the only required field in the spec for this endpoint
+    input: str | list[dict[str, Any]] | None = None
+    instructions: str | None = None
+    previous_response_id: str | None = None
+    prompt_cache_key: str | None = None
+
+
 class OutputText(BaseModel):
     type: Literal["output_text"] = "output_text"
     text: str
@@ -50,6 +60,13 @@ class FunctionCall(BaseModel):
     name: str
     arguments: str  # json string, not an object
     status: ItemStatus = "completed"
+
+
+class CompactionItem(BaseModel):
+    type: Literal["compaction"] = "compaction"
+    id: str
+    # not really encrypted, just the summary base64 encoded so clients treat it as opaque
+    encrypted_content: str
 
 
 class InputTokensDetails(BaseModel):
@@ -117,3 +134,11 @@ class ErrorDetail(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorDetail
+
+
+class CompactResource(BaseModel):
+    id: str
+    object: Literal["response.compaction"] = "response.compaction"
+    output: list[CompactionItem]
+    created_at: int
+    usage: Usage

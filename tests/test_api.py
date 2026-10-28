@@ -300,3 +300,28 @@ def test_streaming_error_ends_with_failed(client, fake):
         check_schema(EVENT_SCHEMAS[e["type"]], e)
     assert [e["type"] for e in events][-2:] == ["error", "response.failed"]
     assert events[-1]["response"]["status"] == "failed"
+
+
+def test_compact(client, fake):
+    fake.reply = "The user asked about KernelForge and its models."
+    history = [
+        {"role": "user", "content": "What is KernelForge?"},
+        {"role": "assistant", "content": "His LLM research project with C3.ai."},
+    ]
+    r = client.post("/v1/responses/compact", json={"model": "x", "input": history}, headers=AUTH)
+    body = r.json()
+    assert r.status_code == 200
+    check_schema("CompactResource", body)
+    assert body["output"][0]["type"] == "compaction"
+
+    # the compacted item can be sent back as input in a new response
+    post(client, {"input": body["output"] + [{"role": "user", "content": "Which models?"}]})
+    turns = fake.last[1]
+    assert fake.reply in turns[0].text
+    assert turns[1].text == "Which models?"
+
+
+def test_compact_needs_model(client, fake):
+    r = client.post("/v1/responses/compact", json={"input": "hi"}, headers=AUTH)
+    assert r.status_code == 400
+    assert r.json()["error"]["param"] == "model"

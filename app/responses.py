@@ -9,6 +9,9 @@ from typing import Any
 
 from app.providers.base import LLMOptions, LLMResult, Turn
 from app.schemas import (
+    CompactionItem,
+    CompactRequest,
+    CompactResource,
     CreateResponseRequest,
     FunctionCall,
     OutputMessage,
@@ -89,7 +92,7 @@ def tool_output_text(output: Any) -> str:
     return output if isinstance(output, str) else parse_content(output)[0]
 
 
-def normalize_input(req: CreateResponseRequest) -> tuple[list[str], list[Turn]]:
+def normalize_input(req: CreateResponseRequest | CompactRequest) -> tuple[list[str], list[Turn]]:
     """Split the request into (client instructions, conversation turns)."""
     instructions = [req.instructions] if req.instructions else []
     turns: list[Turn] = []
@@ -125,11 +128,39 @@ def normalize_input(req: CreateResponseRequest) -> tuple[list[str], list[Turn]]:
             elif kind == "function_call_output":
                 output = tool_output_text(item.get("output", ""))
                 turns.append(Turn("user", f"[result of tool call {item.get('call_id')}]: {output}"))
+            elif kind == "compaction":
+                summary = decode_summary(item.get("encrypted_content"))
+                turns.append(Turn("user", f"[summary of the earlier conversation]: {summary}"))
             # reasoning, item_reference, etc. are skipped
 
     if not any(t.role == "user" for t in turns):
         raise APIError(400, "input must include at least one user message", param="input")
     return instructions, turns
+
+
+def encode_summary(text: str) -> str:
+    return base64.b64encode(text.encode()).decode()
+
+
+def decode_summary(content: Any) -> str:
+    try:
+        return base64.b64decode(content, validate=True).decode()
+    except (binascii.Error, UnicodeDecodeError, TypeError, ValueError):
+        raise APIError(400, "compaction item has invalid encrypted_content", param="input")
+
+
+def build_compaction(result: LLMResult) -> CompactResource:
+    return CompactResource(
+        id=new_id("resp"),
+        created_at=int(time.time()),
+        output=[CompactionItem(id=new_id("cmp"), encrypted_content=encode_summary(result.text))],
+        usage=Usage(
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            total_tokens=result.input_tokens + result.output_tokens,
+            output_tokens_details=OutputTokensDetails(reasoning_tokens=result.reasoning_tokens),
+        ),
+    )
 
 
 def options_from(req: CreateResponseRequest) -> LLMOptions:

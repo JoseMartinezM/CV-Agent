@@ -16,6 +16,7 @@ from app.responses import (
     APIError,
     as_api_error,
     base_response,
+    build_compaction,
     finish_response,
     new_id,
     normalize_input,
@@ -23,7 +24,14 @@ from app.responses import (
     save_history,
     stream_events,
 )
-from app.schemas import CreateResponseRequest, ErrorDetail, ErrorResponse, ResponseResource
+from app.schemas import (
+    CompactRequest,
+    CompactResource,
+    CreateResponseRequest,
+    ErrorDetail,
+    ErrorResponse,
+    ResponseResource,
+)
 
 app = FastAPI(title="Jose Manuel CV Agent")
 # browser clients (like the official compliance page) need this. it's safe to open
@@ -110,6 +118,24 @@ def create_response(req: CreateResponseRequest):
     response = finish_response(base_response(req, response_id, int(start), result.model), result, new_id("msg"))
     done(result, response.status)
     return response
+
+
+@app.post("/v1/responses/compact", dependencies=[Depends(check_api_key)], response_model=CompactResource)
+def compact_response(req: CompactRequest):
+    start = time.time()
+    instructions, turns = normalize_input(req)
+    result = agent.compact(turns, instructions)
+    compacted = build_compaction(result)
+    log(
+        request_id=compacted.id,
+        path="/v1/responses/compact",
+        model=result.model,
+        turns=len(turns),
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        latency_ms=int((time.time() - start) * 1000),
+    )
+    return compacted
 
 
 def stream_with_logging(

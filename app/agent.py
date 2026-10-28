@@ -19,6 +19,12 @@ CLIENT_TOOLS_NOTE = (
     "call it, even if the topic is outside the profile. The client runs the tool, not you."
 )
 
+SUMMARY_PROMPT = (
+    "Summarize the conversation below so it can be continued later without the full history. "
+    "Keep names, facts, decisions and open questions. Write in the same language as the "
+    "conversation, plain text, at most 150 words."
+)
+
 EMPTY_ANSWER = "Sorry, I couldn't come up with an answer to that. Could you rephrase it?"
 
 
@@ -76,6 +82,13 @@ def answer_stream(
         if fill_if_empty(item):
             yield item.text
         yield item
+
+
+def compact(turns: list[Turn], client_instructions: list[str]) -> LLMResult:
+    transcript = "\n".join(f"{t.role}: {t.text}" for t in turns)
+    if client_instructions:
+        transcript = "system: " + "\n".join(client_instructions) + "\n" + transcript
+    return provider.generate(SUMMARY_PROMPT, [Turn("user", transcript)], LLMOptions())
 
 
 def no_em_dashes(text: str) -> str:
