@@ -1,0 +1,5 @@
+data/*.pdf
+tests
+CLAUDE.md
+Dockerfile
+.dockerignore
