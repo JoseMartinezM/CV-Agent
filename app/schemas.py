@@ -100,7 +100,7 @@ class ResponseResource(BaseModel):
     usage: Usage | None = None
     max_output_tokens: int | None = None
     max_tool_calls: int | None = None
-    store: bool = False  # stateless, nothing is saved
+    store: bool = False
     background: bool = False
     service_tier: str = "default"
     metadata: dict[str, Any] = {}
