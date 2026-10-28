@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from pathlib import Path
 
 from app.config import settings
@@ -48,6 +49,26 @@ def answer(
         result.text = EMPTY_ANSWER
     result.text = no_em_dashes(result.text)
     return result
+
+
+def answer_stream(
+    turns: list[Turn],
+    client_instructions: list[str],
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> Iterator[str | LLMResult]:
+    text = ""
+    for item in provider.stream(build_system_prompt(client_instructions), turns, temperature, max_tokens):
+        if isinstance(item, str):
+            delta = no_em_dashes(item)
+            text += delta
+            yield delta
+            continue
+        if not text and not item.truncated:
+            text = EMPTY_ANSWER
+            yield EMPTY_ANSWER
+        item.text = text
+        yield item
 
 
 def no_em_dashes(text: str) -> str:

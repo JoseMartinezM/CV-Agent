@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -26,3 +27,13 @@ class LLMProvider(Protocol):
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> LLMResult: ...
+
+    def stream(
+        self,
+        system: str,
+        turns: list[Turn],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> Iterator[str | LLMResult]:
+        """Yields text chunks, then one LLMResult at the end."""
+        ...

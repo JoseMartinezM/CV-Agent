@@ -1,15 +1,26 @@
 import json
 import secrets
 import time
+from collections.abc import Callable, Iterator
 
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from google.genai import errors as genai_errors
 
 from app import agent
 from app.config import settings
-from app.responses import APIError, build_response, new_id, normalize_input, save_history
+from app.providers.base import LLMResult, Turn
+from app.responses import (
+    APIError,
+    as_api_error,
+    base_response,
+    finish_response,
+    new_id,
+    normalize_input,
+    save_history,
+    stream_events,
+)
 from app.schemas import CreateResponseRequest, ErrorDetail, ErrorResponse, ResponseResource
 
 app = FastAPI(title="Jose Manuel CV Agent")
@@ -42,11 +53,7 @@ def handle_validation_error(request: Request, e: RequestValidationError):
 @app.exception_handler(genai_errors.APIError)
 def handle_model_error(request: Request, e: genai_errors.APIError):
     log("ERROR", path=request.url.path, model_status=e.code, error=str(e)[:500])
-    if e.code == 429:
-        err = APIError(429, "The model is out of quota, try again in a minute", type="too_many_requests")
-    else:
-        err = APIError(500, "The model failed to answer, try again", type="model_error")
-    return error_response(err)
+    return error_response(as_api_error(e))
 
 
 @app.exception_handler(Exception)
@@ -72,19 +79,49 @@ def create_response(req: CreateResponseRequest):
     response_id = new_id("resp")
     instructions, turns = normalize_input(req)
 
-    result = agent.answer(turns, instructions, req.temperature, req.max_output_tokens)
-    response = build_response(req, result, response_id, int(start))
-    save_history(response_id, turns, result.text)
+    def done(result: LLMResult, status: str) -> None:
+        save_history(response_id, turns, result.text)
+        log(
+            request_id=response_id,
+            path="/v1/responses",
+            stream=req.stream,
+            model=result.model,
+            status=status,
+            turns=len(turns),
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            latency_ms=int((time.time() - start) * 1000),
+        )
 
-    log(
-        request_id=response_id,
-        path="/v1/responses",
-        stream=False,
-        model=result.model,
-        status=response.status,
-        turns=len(turns),
-        input_tokens=result.input_tokens,
-        output_tokens=result.output_tokens,
-        latency_ms=int((time.time() - start) * 1000),
-    )
+    if req.stream:
+        return StreamingResponse(
+            stream_with_logging(req, response_id, int(start), instructions, turns, done),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    result = agent.answer(turns, instructions, req.temperature, req.max_output_tokens)
+    response = finish_response(base_response(req, response_id, int(start), result.model), result, new_id("msg"))
+    done(result, response.status)
     return response
+
+
+def stream_with_logging(
+    req: CreateResponseRequest,
+    response_id: str,
+    created_at: int,
+    instructions: list[str],
+    turns: list[Turn],
+    done: Callable[[LLMResult, str], None],
+) -> Iterator[str]:
+    def chunks():
+        try:
+            for item in agent.answer_stream(turns, instructions, req.temperature, req.max_output_tokens):
+                if isinstance(item, LLMResult):
+                    done(item, "incomplete" if item.truncated else "completed")
+                yield item
+        except Exception as e:
+            log("ERROR", request_id=response_id, path="/v1/responses", stream=True, error=repr(e)[:500])
+            raise
+
+    yield from stream_events(req, response_id, created_at, settings.llm_model, chunks())

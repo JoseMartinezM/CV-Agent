@@ -1,5 +1,8 @@
+import json
 import time
 import uuid
+from collections.abc import Iterator
+from itertools import count
 from typing import Any
 
 from app.providers.base import LLMResult, Turn
@@ -8,6 +11,7 @@ from app.schemas import (
     OutputMessage,
     OutputText,
     OutputTokensDetails,
+    ResponseError,
     ResponseResource,
     Usage,
 )
@@ -93,29 +97,98 @@ def normalize_input(req: CreateResponseRequest) -> tuple[list[str], list[Turn]]:
     return instructions, turns
 
 
-def build_response(req: CreateResponseRequest, result: LLMResult, response_id: str, created_at: int) -> ResponseResource:
-    status = "incomplete" if result.truncated else "completed"
+def base_response(req: CreateResponseRequest, response_id: str, created_at: int, model: str) -> ResponseResource:
+    # the in_progress snapshot, also used as the starting point for the final one
     return ResponseResource(
         id=response_id,
         created_at=created_at,
-        completed_at=int(time.time()) if status == "completed" else None,
-        status=status,
-        incomplete_details={"reason": "max_output_tokens"} if result.truncated else None,
-        model=result.model,
+        status="in_progress",
+        model=model,
         previous_response_id=req.previous_response_id,
         instructions=req.instructions,
-        output=[OutputMessage(id=new_id("msg"), status=status, content=[OutputText(text=result.text)])],
         tools=[{"description": None, "parameters": None, "strict": True, **t} for t in req.tools or []],
         tool_choice=req.tool_choice or "auto",
         temperature=req.temperature if req.temperature is not None else 1.0,
         top_p=req.top_p if req.top_p is not None else 1.0,
         max_output_tokens=req.max_output_tokens,
-        usage=Usage(
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            total_tokens=result.input_tokens + result.output_tokens,
-            output_tokens_details=OutputTokensDetails(reasoning_tokens=result.reasoning_tokens),
-        ),
         store=True,
         metadata=req.metadata or {},
     )
+
+
+def finish_response(base: ResponseResource, result: LLMResult, msg_id: str) -> ResponseResource:
+    status = "incomplete" if result.truncated else "completed"
+    message = OutputMessage(id=msg_id, status=status, content=[OutputText(text=result.text)])
+    return base.model_copy(
+        update={
+            "status": status,
+            "model": result.model,
+            "completed_at": int(time.time()) if status == "completed" else None,
+            "incomplete_details": {"reason": "max_output_tokens"} if result.truncated else None,
+            "output": [message],
+            "usage": Usage(
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                total_tokens=result.input_tokens + result.output_tokens,
+                output_tokens_details=OutputTokensDetails(reasoning_tokens=result.reasoning_tokens),
+            ),
+        }
+    )
+
+
+def as_api_error(e: Exception) -> APIError:
+    if isinstance(e, APIError):
+        return e
+    if getattr(e, "code", None) == 429:  # gemini quota
+        return APIError(429, "The model is out of quota, try again in a minute", type="too_many_requests")
+    return APIError(500, "The model failed to answer, try again", type="model_error")
+
+
+def sse(event: dict[str, Any]) -> str:
+    return f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+def stream_events(
+    req: CreateResponseRequest,
+    response_id: str,
+    created_at: int,
+    model: str,
+    chunks: Iterator[str | LLMResult],
+) -> Iterator[str]:
+    seq = count()
+    msg_id = new_id("msg")
+    where = {"item_id": msg_id, "output_index": 0, "content_index": 0}
+
+    def event(type: str, **fields: Any) -> str:
+        return sse({"type": type, "sequence_number": next(seq), **fields})
+
+    base = base_response(req, response_id, created_at, model)
+    yield event("response.created", response=base.model_dump())
+    yield event("response.in_progress", response=base.model_dump())
+    item = OutputMessage(id=msg_id, status="in_progress", content=[])
+    yield event("response.output_item.added", output_index=0, item=item.model_dump())
+    yield event("response.content_part.added", **where, part=OutputText(text="").model_dump())
+
+    try:
+        for chunk in chunks:
+            if isinstance(chunk, str):
+                yield event("response.output_text.delta", **where, delta=chunk, logprobs=[])
+            else:
+                result = chunk
+    except Exception as e:
+        # headers are already sent, so errors go as events. spec says error then response.failed
+        err = as_api_error(e)
+        yield event("error", error={"type": err.type, "code": err.code, "message": err.message, "param": err.param})
+        failed = base.model_copy(
+            update={"status": "failed", "error": ResponseError(code=err.code or err.type, message=err.message)}
+        )
+        yield event("response.failed", response=failed.model_dump())
+        return
+
+    final = finish_response(base, result, msg_id)
+    message = final.output[0]
+    yield event("response.output_text.done", **where, text=result.text, logprobs=[])
+    yield event("response.content_part.done", **where, part=message.content[0].model_dump())
+    yield event("response.output_item.done", output_index=0, item=message.model_dump())
+    terminal = "response.incomplete" if final.status == "incomplete" else "response.completed"
+    yield event(terminal, response=final.model_dump())
