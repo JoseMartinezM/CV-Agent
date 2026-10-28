@@ -6,4 +6,5 @@ google-genai==2.33.0
 
 # tests
 httpx==0.28.1
+jsonschema==4.26.0
 pytest==9.2.0

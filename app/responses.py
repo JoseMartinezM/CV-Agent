@@ -1,3 +1,5 @@
+import base64
+import binascii
 import json
 import time
 import uuid
@@ -5,9 +7,10 @@ from collections.abc import Iterator
 from itertools import count
 from typing import Any
 
-from app.providers.base import LLMResult, Turn
+from app.providers.base import LLMOptions, LLMResult, Turn
 from app.schemas import (
     CreateResponseRequest,
+    FunctionCall,
     OutputMessage,
     OutputText,
     OutputTokensDetails,
@@ -52,14 +55,38 @@ def save_history(response_id: str, turns: list[Turn], answer: str) -> None:
         _history.pop(next(iter(_history)))
 
 
-def content_text(content: Any) -> str:
+def parse_content(content: Any) -> tuple[str, list[str]]:
+    """Returns (text, image data urls)."""
     if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(
-            p["text"] for p in content if isinstance(p, dict) and p.get("type") in TEXT_PARTS and "text" in p
-        )
-    raise APIError(400, "message content must be a string or a list of content parts", param="input")
+        return content, []
+    if not isinstance(content, list):
+        raise APIError(400, "message content must be a string or a list of content parts", param="input")
+    texts = []
+    images = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in TEXT_PARTS and "text" in part:
+            texts.append(part["text"])
+        elif part.get("type") == "input_image":
+            images.append(check_image(part.get("image_url")))
+    return "\n".join(texts), images
+
+
+def check_image(url: Any) -> str:
+    # ponytail: only inline base64 images. fetching http urls means downloading
+    # whatever a stranger points us at, not worth it for a cv agent
+    if not isinstance(url, str) or not url.startswith("data:image/") or ";base64," not in url:
+        raise APIError(400, "only base64 data: URLs are supported for input_image", param="input")
+    try:
+        base64.b64decode(url.split(",", 1)[1], validate=True)
+    except binascii.Error:
+        raise APIError(400, "input_image has invalid base64 data", param="input")
+    return url
+
+
+def tool_output_text(output: Any) -> str:
+    return output if isinstance(output, str) else parse_content(output)[0]
 
 
 def normalize_input(req: CreateResponseRequest) -> tuple[list[str], list[Turn]]:
@@ -83,18 +110,35 @@ def normalize_input(req: CreateResponseRequest) -> tuple[list[str], list[Turn]]:
     else:
         for item in req.input or []:
             # messages can come without "type", the spec allows the short form
-            if item.get("type", "message") != "message":
-                continue  # reasoning, item_reference, etc. we don't use them
-            role = item.get("role")
-            text = content_text(item.get("content", ""))
-            if role in ("system", "developer"):
-                instructions.append(text)
-            elif role in ("user", "assistant"):
-                turns.append(Turn(role, text))
+            kind = item.get("type", "message")
+            if kind == "message":
+                role = item.get("role")
+                text, images = parse_content(item.get("content", ""))
+                if role in ("system", "developer"):
+                    instructions.append(text)
+                elif role in ("user", "assistant"):
+                    turns.append(Turn(role, text, images))
+            # client tool round trips go to the model as plain text, simpler than
+            # rebuilding gemini function call parts (and their thought signatures)
+            elif kind == "function_call":
+                turns.append(Turn("assistant", f"[called tool {item.get('name')} with {item.get('arguments')}]"))
+            elif kind == "function_call_output":
+                output = tool_output_text(item.get("output", ""))
+                turns.append(Turn("user", f"[result of tool call {item.get('call_id')}]: {output}"))
+            # reasoning, item_reference, etc. are skipped
 
     if not any(t.role == "user" for t in turns):
         raise APIError(400, "input must include at least one user message", param="input")
     return instructions, turns
+
+
+def options_from(req: CreateResponseRequest) -> LLMOptions:
+    return LLMOptions(
+        temperature=req.temperature,
+        max_tokens=req.max_output_tokens,
+        tools=req.tools or [],
+        tool_choice=req.tool_choice,
+    )
 
 
 def base_response(req: CreateResponseRequest, response_id: str, created_at: int, model: str) -> ResponseResource:
@@ -116,16 +160,24 @@ def base_response(req: CreateResponseRequest, response_id: str, created_at: int,
     )
 
 
-def finish_response(base: ResponseResource, result: LLMResult, msg_id: str) -> ResponseResource:
+def finish_response(
+    base: ResponseResource, result: LLMResult, msg_id: str, keep_empty_message: bool = False
+) -> ResponseResource:
     status = "incomplete" if result.truncated else "completed"
-    message = OutputMessage(id=msg_id, status=status, content=[OutputText(text=result.text)])
+    output: list[OutputMessage | FunctionCall] = []
+    # a tool call usually comes with no text, skip the empty message then.
+    # streaming already announced the message, so it has to stay there
+    if result.text or not result.tool_calls or keep_empty_message:
+        output.append(OutputMessage(id=msg_id, status=status, content=[OutputText(text=result.text)]))
+    for call in result.tool_calls:
+        output.append(FunctionCall(id=new_id("fc"), call_id=new_id("call"), name=call.name, arguments=call.arguments))
     return base.model_copy(
         update={
             "status": status,
             "model": result.model,
             "completed_at": int(time.time()) if status == "completed" else None,
             "incomplete_details": {"reason": "max_output_tokens"} if result.truncated else None,
-            "output": [message],
+            "output": output,
             "usage": Usage(
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
@@ -185,10 +237,18 @@ def stream_events(
         yield event("response.failed", response=failed.model_dump())
         return
 
-    final = finish_response(base, result, msg_id)
+    final = finish_response(base, result, msg_id, keep_empty_message=True)
     message = final.output[0]
     yield event("response.output_text.done", **where, text=result.text, logprobs=[])
     yield event("response.content_part.done", **where, part=message.content[0].model_dump())
     yield event("response.output_item.done", output_index=0, item=message.model_dump())
+
+    # gemini hands over tool calls whole, so the arguments go in a single delta
+    for index, call in enumerate(final.output[1:], start=1):
+        started = call.model_copy(update={"status": "in_progress", "arguments": ""})
+        yield event("response.output_item.added", output_index=index, item=started.model_dump())
+        yield event("response.function_call_arguments.delta", item_id=call.id, output_index=index, delta=call.arguments)
+        yield event("response.function_call_arguments.done", item_id=call.id, output_index=index, arguments=call.arguments)
+        yield event("response.output_item.done", output_index=index, item=call.model_dump())
     terminal = "response.incomplete" if final.status == "incomplete" else "response.completed"
     yield event(terminal, response=final.model_dump())

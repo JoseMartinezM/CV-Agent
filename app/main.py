@@ -18,6 +18,7 @@ from app.responses import (
     finish_response,
     new_id,
     normalize_input,
+    options_from,
     save_history,
     stream_events,
 )
@@ -90,6 +91,7 @@ def create_response(req: CreateResponseRequest):
             turns=len(turns),
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
+            tool_calls=len(result.tool_calls),
             latency_ms=int((time.time() - start) * 1000),
         )
 
@@ -100,7 +102,7 @@ def create_response(req: CreateResponseRequest):
             headers={"Cache-Control": "no-cache"},
         )
 
-    result = agent.answer(turns, instructions, req.temperature, req.max_output_tokens)
+    result = agent.answer(turns, instructions, options_from(req))
     response = finish_response(base_response(req, response_id, int(start), result.model), result, new_id("msg"))
     done(result, response.status)
     return response
@@ -116,7 +118,7 @@ def stream_with_logging(
 ) -> Iterator[str]:
     def chunks():
         try:
-            for item in agent.answer_stream(turns, instructions, req.temperature, req.max_output_tokens):
+            for item in agent.answer_stream(turns, instructions, options_from(req)):
                 if isinstance(item, LLMResult):
                     done(item, "incomplete" if item.truncated else "completed")
                 yield item
