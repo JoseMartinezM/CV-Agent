@@ -12,6 +12,8 @@ SYSTEM_PROMPT = (
     (ROOT / "prompts/system.md").read_text(encoding="utf-8")
     + "\n"
     + (ROOT / "data/profile.md").read_text(encoding="utf-8")
+    # repeated at the end because the model kept answering spanish refusals in english
+    + "\n# Reminder\n\nAlways reply in the language of the user's latest message, refusals included.\n"
 )
 
 CLIENT_TOOLS_NOTE = (

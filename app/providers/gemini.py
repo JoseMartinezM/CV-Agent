@@ -4,18 +4,21 @@ from collections.abc import Iterator
 from itertools import chain
 from typing import Any
 
+import httpx
 from google import genai
 from google.genai import errors, types
 
 from app.providers.base import LLMOptions, LLMResult, ToolCall, Turn
 
 # the free tier throws these a lot when a model is busy, worth trying the fallback
-RETRY_ON = {429, 500, 503}
+RETRY_ON = {429, 500, 503, 504}
+# normal answers take 2 to 12 s on the free tier, past this the call is likely stuck
+TIMEOUT_MS = 30_000
 
 
 class GeminiProvider:
     def __init__(self, api_key: str, model: str, fallback_model: str = ""):
-        self.client = genai.Client(api_key=api_key)
+        self.client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=TIMEOUT_MS))
         self.models = [model]
         if fallback_model and fallback_model != model:
             self.models.append(fallback_model)
@@ -26,9 +29,10 @@ class GeminiProvider:
             try:
                 r = self.client.models.generate_content(model=model, contents=contents, config=config)
                 break
-            except errors.APIError as e:
-                if e.code not in RETRY_ON or model == self.models[-1]:
+            except (errors.APIError, httpx.TimeoutException) as e:
+                if not worth_retrying(e) or model == self.models[-1]:
                     raise
+                log_fallback(model, e)
         text, calls = read_parts(r)
         return to_result(r, text, calls, model)
 
@@ -41,9 +45,10 @@ class GeminiProvider:
                 # to still be able to switch models before sending anything
                 first = next(chunks, None)
                 break
-            except errors.APIError as e:
-                if e.code not in RETRY_ON or model == self.models[-1]:
+            except (errors.APIError, httpx.TimeoutException) as e:
+                if not worth_retrying(e) or model == self.models[-1]:
                     raise
+                log_fallback(model, e)
 
         text = ""
         calls: list[ToolCall] = []
@@ -58,12 +63,18 @@ class GeminiProvider:
         yield to_result(last, text, calls, model)
 
 
+def worth_retrying(e: Exception) -> bool:
+    return isinstance(e, httpx.TimeoutException) or e.code in RETRY_ON
+
+
+def log_fallback(model: str, e: Exception) -> None:
+    # same json line format as main.log, so it shows up next to the request logs
+    print(json.dumps({"severity": "WARNING", "event": "model_fallback", "model": model, "error": repr(e)[:300]}), flush=True)
+
+
 def build_request(
     system: str, turns: list[Turn], options: LLMOptions
 ) -> tuple[types.GenerateContentConfig, list[types.Content]]:
-    # gemini counts thinking tokens inside max_output_tokens, so with a small
-    # limit the whole budget goes to thinking and the answer comes back empty
-    thinking = "minimal" if options.max_tokens else "low"
     functions = [
         types.FunctionDeclaration(
             name=t["name"],
@@ -77,7 +88,9 @@ def build_request(
         system_instruction=system,
         temperature=options.temperature,
         max_output_tokens=options.max_tokens,
-        thinking_config=types.ThinkingConfig(thinking_level=thinking),
+        # answers are short lookups in the profile. more thinking tripled latency
+        # without changing eval results, and it eats into max_output_tokens
+        thinking_config=types.ThinkingConfig(thinking_level="minimal"),
         tools=[types.Tool(function_declarations=functions)] if functions else None,
         tool_config=tool_config(options.tool_choice) if functions else None,
     )

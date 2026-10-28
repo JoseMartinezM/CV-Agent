@@ -3,8 +3,8 @@ uvicorn==0.54.0
 pydantic==2.14.1
 pydantic-settings==2.16.1
 google-genai==2.33.0
+httpx==0.28.1
 
 # tests
-httpx==0.28.1
 jsonschema==4.26.0
 pytest==9.2.0

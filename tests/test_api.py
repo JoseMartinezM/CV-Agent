@@ -325,3 +325,28 @@ def test_compact_needs_model(client, fake):
     r = client.post("/v1/responses/compact", json={"input": "hi"}, headers=AUTH)
     assert r.status_code == 400
     assert r.json()["error"]["param"] == "model"
+
+
+def test_gemini_falls_back_on_timeout():
+    from types import SimpleNamespace
+
+    import httpx
+    from google.genai import types
+
+    from app.providers.base import LLMOptions, Turn
+    from app.providers.gemini import GeminiProvider
+
+    tried = []
+
+    def generate_content(model, contents, config):
+        tried.append(model)
+        if model == "main":
+            raise httpx.ReadTimeout("stuck")
+        part = types.Part(text="hi")
+        return types.GenerateContentResponse(candidates=[types.Candidate(content=types.Content(role="model", parts=[part]))])
+
+    p = GeminiProvider("not-used", "main", "backup")
+    p.client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+    result = p.generate("system", [Turn("user", "hi")], LLMOptions())
+    assert tried == ["main", "backup"]
+    assert (result.text, result.model) == ("hi", "backup")

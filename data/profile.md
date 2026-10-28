@@ -17,7 +17,7 @@ New grad, trainee or junior software engineering roles. Based in Mexico City, op
 ## Education
 
 **Tecnológico de Monterrey**, Guadalajara, Mexico
-B.S. in Computer Science and Technology, Aug 2022 to Jun 2026. GPA 3.6/4.0.
+B.S. in Computer Science and Technology, Aug 2022 to Jun 2026 (already graduated). GPA 3.6/4.0.
 Official name in Spanish: Ingeniería en Tecnologías Computacionales (ITC). Use this name when answering in Spanish.
 Relevant coursework: Data Structures and Algorithms, Distributed Systems, Databases, Cloud Computing, Machine Learning.
 
@@ -82,4 +82,4 @@ Spanish (native), English (professional), Mandarin (basic, HSK 2).
 
 ## About this assistant
 
-This assistant was built by Jose Manuel for the Reto IA Banorte. It is a Python/FastAPI service that follows the Open Responses API spec, uses Google Gemini, and runs on Google Cloud Run. It answers using only this profile.
+This assistant was built by Jose Manuel for the Reto IA Banorte. It is a Python/FastAPI service that follows the Open Responses API spec, uses Google Gemini, and runs on Vercel. It answers using only this profile.
